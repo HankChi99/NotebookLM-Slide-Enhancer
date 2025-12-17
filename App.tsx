@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import PptxGenJS from 'pptxgenjs';
-import { Download, FileUp, Sparkles, AlertCircle, Image as ImageIcon, Loader2, LayoutTemplate, BookOpen, ChevronDown, ChevronUp } from 'lucide-react';
+import { Download, FileUp, Sparkles, AlertCircle, Image as ImageIcon, Loader2, LayoutTemplate, BookOpen, ChevronDown, ChevronUp, Key, LogOut } from 'lucide-react';
 import { SlidePage, ImageSize, ProcessingStatus } from './types';
 import { APP_TITLE, APP_DESCRIPTION } from './constants';
 import { convertPdfToImages } from './services/pdfService';
@@ -14,7 +14,10 @@ interface AIStudio {
 }
 
 const App: React.FC = () => {
-  const [apiKeyReady, setApiKeyReady] = useState<boolean>(false);
+  const [apiKey, setApiKey] = useState<string>("");
+  const [manualKeyInput, setManualKeyInput] = useState<string>("");
+  const [isIdxEnv, setIsIdxEnv] = useState<boolean>(false);
+  
   const [pages, setPages] = useState<SlidePage[]>([]);
   const [imageSize, setImageSize] = useState<ImageSize>(ImageSize.SIZE_2K);
   const [contextText, setContextText] = useState<string>("");
@@ -24,34 +27,62 @@ const App: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const processingRef = useRef<boolean>(false);
 
-  // Check for API Key on mount
+  // Initialize API Key Logic
   useEffect(() => {
-    const checkKey = async () => {
-      // Use type assertion to access aistudio on window
+    const initKey = async () => {
+      // 1. Check if running in Project IDX / AI Studio
       const aistudio = (window as any).aistudio as AIStudio | undefined;
-      if (aistudio && await aistudio.hasSelectedApiKey()) {
-        setApiKeyReady(true);
+      
+      if (process.env.API_KEY) {
+        // Injected by environment (IDX or .env file)
+        setApiKey(process.env.API_KEY);
+        setIsIdxEnv(true);
+      } else if (aistudio && await aistudio.hasSelectedApiKey()) {
+        // Selected via AI Studio UI
+        setApiKey("IDX_MANAGED_KEY"); // We assume the environment injects it globally if selected
+        setIsIdxEnv(true);
+      } else {
+        // 2. Check Local Storage for manually entered key
+        const storedKey = localStorage.getItem("gemini_api_key");
+        if (storedKey) {
+          setApiKey(storedKey);
+        }
       }
     };
-    checkKey();
+    initKey();
   }, []);
 
-  const handleSelectKey = async () => {
+  const handleIdxSelectKey = async () => {
     try {
       const aistudio = (window as any).aistudio as AIStudio | undefined;
       if (aistudio) {
         await aistudio.openSelectKey();
-        if (await aistudio.hasSelectedApiKey()) {
-          setApiKeyReady(true);
-          setError(null);
-        }
-      } else {
-        setError("AI Studio environment not detected.");
+        // Force reload or re-check would typically happen here, 
+        // but in IDX the env var usually updates.
+        window.location.reload(); 
       }
     } catch (e) {
       console.error(e);
-      setError("Failed to select API Key.");
+      setError("Failed to select API Key via AI Studio.");
     }
+  };
+
+  const handleManualKeySubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (manualKeyInput.trim().length > 10) {
+      const key = manualKeyInput.trim();
+      setApiKey(key);
+      localStorage.setItem("gemini_api_key", key);
+      setError(null);
+    } else {
+      setError("Invalid API Key format.");
+    }
+  };
+
+  const clearApiKey = () => {
+    setApiKey("");
+    localStorage.removeItem("gemini_api_key");
+    setPages([]);
   };
 
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -87,6 +118,14 @@ const App: React.FC = () => {
 
   const processQueue = async () => {
     if (processingRef.current) return;
+    
+    // Final check for API key
+    const currentKey = apiKey || process.env.API_KEY;
+    if (!currentKey) {
+      setError("API Key is missing. Please configure it.");
+      return;
+    }
+
     processingRef.current = true;
     setIsProcessing(true);
 
@@ -108,7 +147,7 @@ const App: React.FC = () => {
       });
 
       try {
-        const enhancedUrl = await enhanceSlideImage(pages[index].originalImage, imageSize, contextText);
+        const enhancedUrl = await enhanceSlideImage(pages[index].originalImage, imageSize, contextText, currentKey);
         
         setPages(prev => {
           const next = [...prev];
@@ -140,6 +179,12 @@ const App: React.FC = () => {
 
   const retrySlide = async (index: number) => {
     if (!pages[index]) return;
+    
+    const currentKey = apiKey || process.env.API_KEY;
+    if (!currentKey) {
+      setError("API Key missing");
+      return;
+    }
 
     // Update status to processing for this specific slide
     setPages(prev => {
@@ -150,7 +195,7 @@ const App: React.FC = () => {
 
     try {
       // Use current selected image size for retry
-      const enhancedUrl = await enhanceSlideImage(pages[index].originalImage, imageSize, contextText);
+      const enhancedUrl = await enhanceSlideImage(pages[index].originalImage, imageSize, contextText, currentKey);
       
       setPages(prev => {
         const next = [...prev];
@@ -183,13 +228,10 @@ const App: React.FC = () => {
   const downloadPPTX = (type: 'standard' | 'google') => {
     const pptx = new PptxGenJS();
     
-    // Check if we have any processed pages, if not, warn user or just export originals?
-    // Let's prioritize enhanced, fallback to original if missing.
     pages.forEach(page => {
       const slide = pptx.addSlide();
       const imageSource = page.enhancedImage || page.originalImage;
       
-      // Add image to slide (stretch to fit 16:9)
       slide.addImage({
         data: imageSource,
         x: 0,
@@ -207,7 +249,8 @@ const App: React.FC = () => {
   const completedCount = pages.filter(p => p.status === ProcessingStatus.COMPLETED).length;
   const progressPercent = pages.length > 0 ? (completedCount / pages.length) * 100 : 0;
 
-  if (!apiKeyReady) {
+  // Render Logic: If no API key is set, show the setup screen
+  if (!apiKey && !process.env.API_KEY) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50 p-4">
         <div className="max-w-md w-full bg-white rounded-2xl shadow-xl p-8 text-center">
@@ -215,29 +258,51 @@ const App: React.FC = () => {
             <Sparkles className="w-8 h-8 text-indigo-600" />
           </div>
           <h1 className="text-2xl font-bold text-gray-900 mb-2">{APP_TITLE}</h1>
-          <p className="text-gray-600 mb-8">{APP_DESCRIPTION}</p>
+          <p className="text-gray-600 mb-6">{APP_DESCRIPTION}</p>
           
           <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 mb-6 text-left">
-             <h3 className="font-semibold text-yellow-800 text-sm mb-1">Billing Requirement</h3>
+             <h3 className="font-semibold text-yellow-800 text-sm mb-1">Setup Required</h3>
              <p className="text-xs text-yellow-700 mb-2">
-               To use the <strong>Gemini 3 Pro Image</strong> model ("Nano Banana Pro"), you must select a paid project API key. 
-               <a href="https://ai.google.dev/gemini-api/docs/billing" target="_blank" rel="noreferrer" className="underline ml-1">Learn more about billing.</a>
+               To use the <strong>Gemini 3 Pro Image</strong> model, you need a Google Gemini API Key.
              </p>
-             <div className="border-t border-yellow-200 pt-2 mt-2">
-               <h4 className="font-semibold text-yellow-800 text-xs mb-1">Have Gemini Advanced?</h4>
-               <p className="text-xs text-yellow-700">
-                  Your "Gemini Advanced" subscription is for the chat interface. For this app, you still need to generate an API Key. 
-                  Don't worry—click the button below, select "Create Project", and you can often start for free or use your cloud billing.
-               </p>
-             </div>
+             <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer" className="text-xs text-indigo-600 font-medium hover:underline flex items-center gap-1">
+               Get a free API Key here <Key className="w-3 h-3"/>
+             </a>
           </div>
 
-          <button
-            onClick={handleSelectKey}
-            className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3 px-6 rounded-lg transition duration-200 flex items-center justify-center gap-2"
-          >
-            Select API Key
-          </button>
+          <div className="space-y-4">
+            {/* Manual Input for Vercel/Public usage */}
+            <form onSubmit={handleManualKeySubmit} className="flex flex-col gap-3">
+              <input 
+                type="password" 
+                value={manualKeyInput}
+                onChange={(e) => setManualKeyInput(e.target.value)}
+                placeholder="Paste your API Key (AIza...)"
+                className="w-full px-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all"
+              />
+              <button
+                type="submit"
+                className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3 px-6 rounded-lg transition duration-200"
+              >
+                Start App
+              </button>
+            </form>
+
+            {/* Separator */}
+            <div className="relative flex py-2 items-center">
+                <div className="flex-grow border-t border-gray-300"></div>
+                <span className="flex-shrink-0 mx-4 text-gray-400 text-xs uppercase">OR</span>
+                <div className="flex-grow border-t border-gray-300"></div>
+            </div>
+
+            {/* IDX Button */}
+            <button
+              onClick={handleIdxSelectKey}
+              className="w-full bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 font-medium py-2 px-6 rounded-lg transition duration-200 text-sm"
+            >
+              Select Key via Google IDX
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -256,8 +321,18 @@ const App: React.FC = () => {
           </div>
           
           <div className="flex items-center gap-3">
+             <button
+                onClick={clearApiKey}
+                className="flex items-center gap-2 px-3 py-2 text-gray-500 hover:text-red-600 hover:bg-red-50 rounded-lg text-xs font-medium transition-colors"
+                title="Clear API Key"
+             >
+                <LogOut className="w-4 h-4" />
+                <span className="hidden sm:inline">Exit</span>
+             </button>
+
              {pages.length > 0 && (
                 <>
+                  <div className="h-6 w-px bg-gray-200 mx-1"></div>
                   <button
                     onClick={() => downloadPPTX('standard')}
                     className="flex items-center gap-2 px-3 py-2 bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 text-sm font-medium rounded-lg transition-colors"

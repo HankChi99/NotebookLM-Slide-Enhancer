@@ -10,12 +10,12 @@ const cleanBase64 = (dataUrl: string) => {
 export const enhanceSlideImage = async (
   originalImageBase64: string,
   size: ImageSize,
-  contextText: string = ""
+  contextText: string = "",
+  apiKey: string
 ): Promise<string> => {
-  // Always use a fresh instance to ensure the latest API key is used
-  const apiKey = process.env.API_KEY;
+  
   if (!apiKey) {
-    throw new Error("API Key not found. Please select a key.");
+    throw new Error("API Key is missing.");
   }
 
   const ai = new GoogleGenAI({ apiKey });
