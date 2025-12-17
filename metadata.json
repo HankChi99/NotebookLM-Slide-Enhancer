@@ -1,0 +1,5 @@
+{
+  "name": "NotebookLM Slide Enhancer",
+  "description": "Transforms PDF presentations into high-quality slides using Gemini Nano Banana Pro AI for image reconstruction and refinement.",
+  "requestFramePermissions": []
+}
